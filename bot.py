@@ -90,7 +90,7 @@ class VoiceTranscriptionBot:
                 # Отправляем клавиатуру отдельным сообщением
                 await context.bot.send_message(
                     chat_id=update.message.chat_id,
-                    text="Что делаем?",
+                    text="Что с этим сделать:",
                     reply_markup=reply_markup
                 )
                 

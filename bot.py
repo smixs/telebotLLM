@@ -39,7 +39,15 @@ class VoiceTranscriptionBot:
         """Set up message handlers."""
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self.handle_audio))
-        self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_callback, 
+            pattern="^(edit_text|make_task)$"
+        ))
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_proofread, 
+            pattern="^proofread$"
+        ))
         
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle the /start command."""
@@ -79,22 +87,20 @@ class VoiceTranscriptionBot:
                 keyboard = [
                     [
                         InlineKeyboardButton("✍️ shima' style", callback_data="edit_text"),
-                        InlineKeyboardButton("📋 make task", callback_data="make_task")
+                        InlineKeyboardButton("🫡 make task", callback_data="make_task"),
+                        InlineKeyboardButton("📝 proofread", callback_data="proofread")
                     ]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
-                # Используем stream_text для отправки транскрипции
-                await self.stream_text(update.message.chat_id, transcript, context.bot)
-                
-                # Отправляем клавиатуру отдельным сообщением
-                await context.bot.send_message(
-                    chat_id=update.message.chat_id,
-                    text="Что с этим сделать:",
+                # Отправляем транскрипт сразу с кнопками
+                await self.stream_text(
+                    update.message.chat_id, 
+                    transcript, 
+                    context.bot, 
                     reply_markup=reply_markup
                 )
                 
-                # Удаляем сообщение о транскрибации
                 await processing_msg.delete()
                 
             else:
@@ -127,16 +133,16 @@ class VoiceTranscriptionBot:
             logger.error(f"Error transcribing audio: {e}")
             return None
 
-    async def stream_text(self, chat_id, text, bot, delay=0.5):
-        """Stream text to a chat by sending it in parts."""
-        MAX_MESSAGE_LENGTH = 4000  # Немного меньше максимума Telegram
-
-        # Разбиваем текст на части
-        parts = [text[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(text), MAX_MESSAGE_LENGTH)]
-
-        for part in parts:
-            await bot.send_message(chat_id=chat_id, text=part)
-            await asyncio.sleep(delay)  # Задержка между отправками
+    async def stream_text(self, chat_id: int, text: str, bot, reply_markup=None):
+        """Stream text in chunks with optional reply markup."""
+        chunk_size = 4096
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i:i + chunk_size]
+            # Добавляем reply_markup только к последнему чанку
+            if i + chunk_size >= len(text):
+                await bot.send_message(chat_id=chat_id, text=chunk, reply_markup=reply_markup)
+            else:
+                await bot.send_message(chat_id=chat_id, text=chunk)
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback queries from inline keyboards."""
@@ -167,7 +173,7 @@ class VoiceTranscriptionBot:
             client = openai.OpenAI()
             response = await asyncio.to_thread(
                 client.chat.completions.create,
-                model="gpt-4o",
+                model="gpt-4o-mini",
                 temperature=0.5,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant."},
@@ -183,6 +189,73 @@ class VoiceTranscriptionBot:
             logger.error(f"Error processing text: {e}")
             await processing_msg.edit_text(
                 "❌ Sorry, something went wrong while processing the text."
+            )
+
+    async def handle_proofread(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle proofread button click."""
+        query = update.callback_query
+        chat_id = query.message.chat_id
+        
+        # Get cached transcription
+        text = self.transcription_cache.get(chat_id)
+        if not text:
+            await query.answer("❌ Текст не найден. Отправьте аудио снова.")
+            return
+
+        await query.answer()
+        processing_msg = await query.message.reply_text("🔍 Корректирую текст...")
+
+        try:
+            # Load and format proofread prompt
+            with open("prompts/proofread.md", "r", encoding="utf-8") as f:
+                prompt_template = f.read()
+            
+            prompt = prompt_template.replace("{{text}}", text)
+            
+            # Get response from OpenAI
+            client = openai.OpenAI()
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            result = response.choices[0].message.content
+            
+            # Stream the result
+            await self.stream_text(chat_id, result, context.bot)
+            await processing_msg.delete()
+            
+        except Exception as e:
+            logger.error(f"Error in proofread: {e}")
+            await processing_msg.edit_text("❌ Произошла ошибка при обработке текста.")
+
+    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle text messages."""
+        try:
+            # Сохраняем текст в кэш
+            self.transcription_cache[update.message.chat_id] = update.message.text
+            
+            # Создаем клавиатуру
+            keyboard = [
+                [
+                    InlineKeyboardButton("✍️ shima' style", callback_data="edit_text"),
+                    InlineKeyboardButton("🫡 make task", callback_data="make_task"),
+                    InlineKeyboardButton("📝 proofread", callback_data="proofread")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Отправляем сообщение с кнопками
+            await update.message.reply_text(
+                "Что с этим сделать?",
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling text: {e}")
+            await update.message.reply_text(
+                "❌ Произошла ошибка при обработке вашего сообщения."
             )
 
     def run(self):

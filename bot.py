@@ -26,9 +26,6 @@ logger = logging.getLogger(__name__)
 # Configure OpenAI
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Load environment variables
-load_dotenv()
-
 class VoiceTranscriptionBot:
     def __init__(self, token: str):
         """Initialize the bot with the given token."""
